@@ -4,8 +4,10 @@
  */
 
 import {AbsoluteCellRange} from './AbsoluteCellRange'
+import {Ast, AstNodeType} from './parser'
 import {invalidSimpleCellAddress, simpleCellAddress, SimpleCellAddress} from './Cell'
 import {CellContent, CellContentParser, RawCellContent} from './CellContentParser'
+import {CellReferenceType} from './parser/CellAddress'
 import {ClipboardCell, ClipboardOperations} from './ClipboardOperations'
 import {Config} from './Config'
 import {ContentChanges} from './ContentChanges'
@@ -374,6 +376,20 @@ export class CrudOperations {
   }
 
   public addNamedExpression(expressionName: string, expression: RawCellContent, sheetId?: number, options?: NamedExpressionOptions) {
+
+    // works for expression
+    //  =$A$1
+    // but not for expression like
+    //  =CONCATENATE($A$1,"hello")
+
+    // if (sheetId !== undefined) {
+    //   if (typeof expression === 'string') {
+    //     if (!(expression as string).includes('!')) {
+    //       const sheetName = this.sheetMapping.fetchDisplayName(sheetId)
+    //       expression = '=' + sheetName + '!' + (expression as string).substring(1)
+    //     }
+    //   }
+    // }
     this.ensureItIsPossibleToAddNamedExpression(expressionName, expression, sheetId)
     this.operations.addNamedExpression(expressionName, expression, sheetId, options)
     this.undoRedo.clearRedoStack()
@@ -402,7 +418,7 @@ export class CrudOperations {
   public ensureItIsPossibleToAddNamedExpression(expressionName: string, expression: RawCellContent, sheetId?: number): void {
     this.ensureScopeIdIsValid(sheetId)
     this.ensureNamedExpressionNameIsValid(expressionName, sheetId)
-    this.ensureNamedExpressionIsValid(expression)
+    this.ensureNamedExpressionIsValid(expression, sheetId)
   }
 
   public ensureItIsPossibleToChangeNamedExpression(expressionName: string, expression: RawCellContent, sheetId?: number): void {
@@ -633,10 +649,78 @@ export class CrudOperations {
     }
   }
 
-  private ensureNamedExpressionIsValid(expression: RawCellContent): void {
+  private addScopeToAbsoluteReferences(ast: Ast, sheetId?: number): boolean {
+    if (sheetId === undefined) {
+      return false
+    }
+    switch (ast.type) {
+      case AstNodeType.EMPTY:
+      case AstNodeType.NUMBER:
+      case AstNodeType.STRING:
+      case AstNodeType.ERROR:
+      case AstNodeType.ERROR_WITH_RAW_INPUT:
+        return false
+      case AstNodeType.CELL_REFERENCE:
+        if ((ast.reference.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.reference.sheet === undefined)) {
+          ast.reference = ast.reference.withSheet(sheetId)
+        }
+        return !ast.reference.isAbsolute()
+      case AstNodeType.CELL_RANGE:
+      case AstNodeType.COLUMN_RANGE:
+      case AstNodeType.ROW_RANGE:
+        // TBD: What about ast.end? not checking that? BUG?
+        if ((ast.start.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.start.sheet === undefined)) {
+          ast.start = ast.start.withSheet(sheetId)
+        }
+        if ((ast.end.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.end.sheet === undefined)) {
+          ast.end = ast.end.withSheet(sheetId)
+        }
+        // if ((ast.end.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.end.sheet === undefined)) {
+        //   ast.end = ast.end.withSheet(sheetId)
+        // }
+        return !ast.start.isAbsolute()
+      case AstNodeType.NAMED_EXPRESSION:
+        return false
+      case AstNodeType.PERCENT_OP:
+      case AstNodeType.PLUS_UNARY_OP:
+      case AstNodeType.MINUS_UNARY_OP: {
+        return this.addScopeToAbsoluteReferences(ast.value, sheetId)
+      }
+      case AstNodeType.CONCATENATE_OP:
+      case AstNodeType.EQUALS_OP:
+      case AstNodeType.NOT_EQUAL_OP:
+      case AstNodeType.LESS_THAN_OP:
+      case AstNodeType.GREATER_THAN_OP:
+      case AstNodeType.LESS_THAN_OR_EQUAL_OP:
+      case AstNodeType.GREATER_THAN_OR_EQUAL_OP:
+      case AstNodeType.MINUS_OP:
+      case AstNodeType.PLUS_OP:
+      case AstNodeType.TIMES_OP:
+      case AstNodeType.DIV_OP:
+      case AstNodeType.POWER_OP:
+        return this.addScopeToAbsoluteReferences(ast.left, sheetId) || this.addScopeToAbsoluteReferences(ast.right, sheetId)
+      case AstNodeType.PARENTHESIS:
+        return this.addScopeToAbsoluteReferences(ast.expression, sheetId)
+      case AstNodeType.FUNCTION_CALL: {
+        return ast.args.some((arg) =>
+        this.addScopeToAbsoluteReferences(arg, sheetId)
+        )
+      }
+      case AstNodeType.ARRAY: {
+        return ast.args.some(row => row.some(arg => this.addScopeToAbsoluteReferences(arg, sheetId)))
+      }
+    }
+  }  
+
+  private ensureNamedExpressionIsValid(expression: RawCellContent, sheetId?: number): void {
     const parsedExpression = this.cellContentParser.parse(expression)
     if (parsedExpression instanceof CellContent.Formula) {
-      const parsingResult = this.parser.parse(parsedExpression.formula, simpleCellAddress(-1, 0, 0))
+      var defSheetScope = -1
+      if (undefined !== sheetId) {
+        defSheetScope = sheetId
+      }
+      const parsingResult = this.parser.parse(parsedExpression.formula, simpleCellAddress(-1, 0, 0), sheetId)
+      this.addScopeToAbsoluteReferences(parsingResult.ast, sheetId)
       if (doesContainRelativeReferences(parsingResult.ast)) {
         throw new NoRelativeAddressesAllowedError()
       }

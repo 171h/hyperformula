@@ -6,8 +6,10 @@
 import {AbsoluteCellRange} from './AbsoluteCellRange'
 import {absolutizeDependencies, filterDependenciesOutOfScope} from './absolutizeDependencies'
 import {ArraySize, ArraySizePredictor} from './ArraySize'
+import {Ast, AstNodeType} from './parser'
 import {equalSimpleCellAddress, invalidSimpleCellAddress, simpleCellAddress, SimpleCellAddress} from './Cell'
 import {CellContent, CellContentParser, RawCellContent} from './CellContentParser'
+import {CellReferenceType} from './parser/CellAddress'
 import {ClipboardCell, ClipboardCellType} from './ClipboardOperations'
 import {Config} from './Config'
 import {ContentChanges} from './ContentChanges'
@@ -373,7 +375,7 @@ export class Operations {
 
   public addNamedExpression(expressionName: string, expression: RawCellContent, sheetId?: number, options?: NamedExpressionOptions) {
     const namedExpression = this.namedExpressions.addNamedExpression(expressionName, sheetId, options)
-    this.storeNamedExpressionInCell(namedExpression.address, expression)
+    this.storeNamedExpressionInCell(namedExpression.address, expression, sheetId)
     this.adjustNamedExpressionEdges(namedExpression, expressionName, sheetId)
   }
 
@@ -825,14 +827,82 @@ export class Operations {
     }
   }
 
-  private storeNamedExpressionInCell(address: SimpleCellAddress, expression: RawCellContent) {
+  private addScopeToAbsoluteReferences(ast: Ast, sheetId?: number): boolean {
+    if (sheetId === undefined) {
+      return false
+    }
+    switch (ast.type) {
+      case AstNodeType.EMPTY:
+      case AstNodeType.NUMBER:
+      case AstNodeType.STRING:
+      case AstNodeType.ERROR:
+      case AstNodeType.ERROR_WITH_RAW_INPUT:
+        return false
+      case AstNodeType.CELL_REFERENCE:
+        if ((ast.reference.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.reference.sheet === undefined)) {
+          ast.reference = ast.reference.withSheet(sheetId)
+        }
+        return !ast.reference.isAbsolute()
+      case AstNodeType.CELL_RANGE:
+      case AstNodeType.COLUMN_RANGE:
+      case AstNodeType.ROW_RANGE:
+        // TBD: What about ast.end? not checking that? BUG?
+        if ((ast.start.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.start.sheet === undefined)) {
+          ast.start = ast.start.withSheet(sheetId)
+        }
+        if ((ast.end.type === CellReferenceType.CELL_REFERENCE_ABSOLUTE) && (ast.end.sheet === undefined)) {
+          ast.end = ast.end.withSheet(sheetId)
+        }
+        return !ast.start.isAbsolute()
+      case AstNodeType.NAMED_EXPRESSION:
+        return false
+      case AstNodeType.PERCENT_OP:
+      case AstNodeType.PLUS_UNARY_OP:
+      case AstNodeType.MINUS_UNARY_OP: {
+        return this.addScopeToAbsoluteReferences(ast.value, sheetId)
+      }
+      case AstNodeType.CONCATENATE_OP:
+      case AstNodeType.EQUALS_OP:
+      case AstNodeType.NOT_EQUAL_OP:
+      case AstNodeType.LESS_THAN_OP:
+      case AstNodeType.GREATER_THAN_OP:
+      case AstNodeType.LESS_THAN_OR_EQUAL_OP:
+      case AstNodeType.GREATER_THAN_OR_EQUAL_OP:
+      case AstNodeType.MINUS_OP:
+      case AstNodeType.PLUS_OP:
+      case AstNodeType.TIMES_OP:
+      case AstNodeType.DIV_OP:
+      case AstNodeType.POWER_OP:
+        return this.addScopeToAbsoluteReferences(ast.left, sheetId) || this.addScopeToAbsoluteReferences(ast.right, sheetId)
+      case AstNodeType.PARENTHESIS:
+        return this.addScopeToAbsoluteReferences(ast.expression, sheetId)
+      case AstNodeType.FUNCTION_CALL: {
+        return ast.args.some((arg) =>
+        this.addScopeToAbsoluteReferences(arg, sheetId)
+        )
+      }
+      case AstNodeType.ARRAY: {
+        return ast.args.some(row => row.some(arg => this.addScopeToAbsoluteReferences(arg, sheetId)))
+      }
+    }
+  } 
+
+  private storeNamedExpressionInCell(address: SimpleCellAddress, expression: RawCellContent, sheetId?: number) {
     const parsedCellContent = this.cellContentParser.parse(expression)
     if (parsedCellContent instanceof CellContent.Formula) {
-      const parsingResult = this.parser.parse(parsedCellContent.formula, simpleCellAddress(-1, 0, 0))
+      //const parsingResult = this.parser.parse(parsedCellContent.formula, simpleCellAddress(-1, 0, 0))
+      var defSheetScope = -1
+      if (undefined !== sheetId) {
+        defSheetScope = sheetId
+      }
+      const parsingResult = this.parser.parse(parsedCellContent.formula, simpleCellAddress(-1, 0, 0), sheetId)
+      this.addScopeToAbsoluteReferences(parsingResult.ast, sheetId) // TBD remove if parser gets it done...
       if (doesContainRelativeReferences(parsingResult.ast)) {
         throw new NoRelativeAddressesAllowedError()
       }
       const {ast, hasVolatileFunction, hasStructuralChangeFunction, dependencies} = parsingResult
+      // dependencies in parsingResult - sheet values are undefined
+      //absolutizeDependencies this is not properly building the dep map - ignoring ast?
       this.dependencyGraph.setFormulaToCell(address, ast, absolutizeDependencies(dependencies, address), ArraySize.scalar(), hasVolatileFunction, hasStructuralChangeFunction)
     } else if (parsedCellContent instanceof CellContent.Empty) {
       this.setCellEmpty(address)

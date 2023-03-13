@@ -39,6 +39,7 @@ export class RangeMapping {
     let sheetMap = this.rangeMapping.get(vertex.getStart().sheet)
     if (sheetMap === undefined) {
       sheetMap = new Map()
+      var t = vertex.getStart()
       this.rangeMapping.set(vertex.getStart().sheet, sheetMap)
     }
     const key = keyFromAddresses(vertex.getStart(), vertex.getEnd())
