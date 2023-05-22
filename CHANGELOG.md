@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.5.1
+
+[compare changes](https://github.com/handsontable/hyperformula/compare/2.3.1...v2.5.1)
+
 ## [Unreleased]
 
 ### Added
