@@ -21,7 +21,7 @@
 </p>
 
 ---
-## Special Version 2.5.3
+## Special Version
 Add address support compared to the official 2.4.0
 
 ---
